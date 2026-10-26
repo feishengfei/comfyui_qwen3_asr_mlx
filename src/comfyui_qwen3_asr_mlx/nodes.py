@@ -24,41 +24,54 @@ def format_lrc_timestamp(seconds:float) -> str:
     ss = seconds % 60
     return f"{mm:02d}:{ss:05.2f}"
 
-def save_as_lrc(all_segments, output_path:str):
+def save_as_lrc(all_segments, output_path:str, title:str="", artist:str="", album:str="", lrc_by:str=""):
     """
     增强版LRC生成：
-    如果一个segment.text内部有多行，将多行在segment[start~end]时间区间均匀分配时间戳
+    1.支持头部元标签 ti / ar / al / by，输入为空则跳过该标签；
+    2.单个segment内部多行文本，在segment[start~end]时间区间均匀分配时间戳
     """
     lrc_lines = []
+    # 头部元标签，非空才写入
+    if title.strip():
+        lrc_lines.append(f"[ti:{title.strip()}]")
+    if artist.strip():
+        lrc_lines.append(f"[ar:{artist.strip()}]")
+    if album.strip():
+        lrc_lines.append(f"[al:{album.strip()}]")
+    if lrc_by.strip():
+        lrc_lines.append(f"[by:{lrc_by.strip()}]")
+    if lrc_lines:
+        lrc_lines.append("") # 空行分隔元标签与歌词
+
+    print(f"\n==== lrc banner ====\n")
+    for s in lrc_lines:
+        print(f"{s}")
+    print(f"\n==== lrc banner ====\n")
     for seg in all_segments:
         seg_start = seg["start"]
         seg_end = seg["end"]
-        seg_text = seg["text"].rstrip("%").strip()  # 去除末尾可能出现的%符号（你的样例有）
-        # 按换行切分内部多行
+        seg_text = seg["text"].rstrip("%").strip()
         sub_lines = [line.strip() for line in seg_text.splitlines() if line.strip()]
         if not sub_lines:
             continue
         duration_total = seg_end - seg_start
         line_count = len(sub_lines)
         if line_count == 1:
-            # 只有一行，直接使用seg_start
             t_str = format_lrc_timestamp(seg_start)
             lrc_lines.append(f"[{t_str}]{sub_lines[0]}")
         else:
-            # 多行：均匀分摊时间
             step = duration_total / line_count
             for idx, sub_text in enumerate(sub_lines):
                 line_time = seg_start + step * idx
                 t_str = format_lrc_timestamp(line_time)
                 lrc_lines.append(f"[{t_str}]{sub_text}")
-
     lrc_content = "\n".join(lrc_lines)
     with open(f"{output_path}.lrc","w",encoding="utf-8") as f:
         f.write(lrc_content)
 
 def save_as_txt_merged(all_segments, output_path:str):
     full_text = "\n".join(s["text"].strip() for s in all_segments)
-    with open(f"{output_path}.txt","w",encoding="utf‑8") as f:
+    with open(f"{output_path}.txt","w",encoding="utf-8") as f:
         f.write(full_text)
 
 def save_as_srt_merged(all_segments, output_path:str):
@@ -67,7 +80,7 @@ def save_as_srt_merged(all_segments, output_path:str):
         s = format_timestamp(seg["start"])
         e = format_timestamp(seg["end"])
         lines.append(f"{idx}\n{s} --> {e}\n{seg['text'].strip()}\n")
-    with open(f"{output_path}.srt","w",encoding="utf‑8") as f:
+    with open(f"{output_path}.srt","w",encoding="utf-8") as f:
         f.write("\n".join(lines))
 
 def save_as_vtt_merged(all_segments, output_path:str):
@@ -76,7 +89,7 @@ def save_as_vtt_merged(all_segments, output_path:str):
         s = format_vtt_timestamp(seg["start"])
         e = format_vtt_timestamp(seg["end"])
         lines.append(f"{idx}\n{s} --> {e}\n{seg['text'].strip()}\n")
-    with open(f"{output_path}.vtt","w",encoding="utf‑8") as f:
+    with open(f"{output_path}.vtt","w",encoding="utf-8") as f:
         f.write("\n".join(lines))
 
 def save_as_json_merged(all_segments, output_path:str):
@@ -84,7 +97,7 @@ def save_as_json_merged(all_segments, output_path:str):
         "segments": all_segments,
         "full_text": "\n".join(s["text"].strip() for s in all_segments)
     }
-    with open(f"{output_path}.json","w",encoding="utf‑8") as f:
+    with open(f"{output_path}.json","w",encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
 
 # =========================
@@ -111,7 +124,7 @@ class Qwen3ASRMLXLoader:
         return (model,)
 
 # =========================
-# 🔹 ASR(单文件)生成节点（原有保留）
+# 🔹 ASR(单文件)生成节点（原有保留，增加language_hint）
 # =========================
 class Qwen3ASRMLXGenerate:
     @classmethod
@@ -125,6 +138,9 @@ class Qwen3ASRMLXGenerate:
                 "file_format": (['txt', 'srt', 'vtt', 'json'], {"default": "txt"}),
                 "verbose" : ("BOOLEAN", {"default": True}),
             },
+            "optional":{
+                "language_hint": (["auto","zh","en","ja","ko","ru","fr"],{"default":"auto","tooltip":"语言提示hint；auto=模型自动检测，zh=中文，en=英文，改善识别漂移"}),
+            }
         }
     RETURN_TYPES = ("STRING", "STRING")
     RETURN_NAMES = ("output_path", "result")
@@ -139,16 +155,19 @@ class Qwen3ASRMLXGenerate:
         file_prefix,
         file_format,
         verbose,
+        language_hint="auto",
     ):
         os.makedirs(output_dir, exist_ok=True)
         output_path=os.path.join(output_dir, f'{file_prefix}')
         result = ''
+        lang_arg = None if language_hint == "auto" else language_hint
         segments = generate_transcription(
             model=model,
             audio=audio_path,
             output_path=output_path,
             format=file_format,
             verbose=verbose,
+            language=lang_arg,
         )
         with open(f"{output_path}.{file_format}", "r", encoding="utf-8") as f:
             result = f.read()
@@ -171,22 +190,28 @@ class Qwen3ASRMLXBatchFolder:
                 "file_format": (["txt","srt","vtt","json","lrc"],{"default":"lrc"}),
                 "verbose": ("BOOLEAN",{"default":True}),
                 "trigger": ("*",{"tooltip":"时序触发，等待上游音频全部写入磁盘后再执行ASR"})
-            }
+            },
+            "optional":{
+                "language_hint": (["auto","zh","en","ja","ko","ru","fr"],{"default":"auto","tooltip":"语言提示hint；auto=模型自动检测，zh=中文，en=英文，改善识别漂移，中文TTS音频建议选zh"}),
+                "title_for_lrc": ("STRING", {"default":"","tooltip":"LRC元标签ti(歌曲标题)；仅file_format=lrc生效，留空不输出标签"}),
+                "artist_for_lrc": ("STRING", {"default":"","tooltip":"LRC元标签ar(艺术家)；仅file_format=lrc生效，留空不输出标签"}),
+                "album_for_lrc": ("STRING", {"default":"","tooltip":"LRC元标签al(专辑)；仅file_format=lrc生效，留空不输出标签"}),
+                "lrc_by": ("STRING", {"default":"Qwen3‑ASR‑MLX","tooltip":"LRC元标签by，生成工具标识；仅file_format=lrc生效"}),
+                }
         }
     RETURN_TYPES = ("STRING","STRING")
     RETURN_NAMES = ("merged_file_path","merged_text")
     FUNCTION = "batch_run"
     CATEGORY = "Qwen3-ASR-MLX"
     OUTPUT_NODE = True
-
-    def batch_run(self, model, audio_folder, file_prefix, output_dir, out_filename, file_format, verbose, trigger):
+    def batch_run(self, model, audio_folder, file_prefix, output_dir, out_filename, file_format, verbose, trigger,
+        language_hint="auto",
+        title_for_lrc="", artist_for_lrc="", album_for_lrc="", lrc_by=""):
         target_dir = Path(audio_folder).absolute()
         if not target_dir.is_dir():
             raise NotADirectoryError(f"音频分片目录不存在：{target_dir}")
-
         os.makedirs(output_dir, exist_ok=True)
         out_base = os.path.join(output_dir, out_filename)
-
         # 正则匹配 prefix_数字. wav/mp3
         escaped_pre = re.escape(file_prefix)
         pat = re.compile(rf"^{escaped_pre}_(\d+)\.(wav|mp3)$", re.IGNORECASE)
@@ -203,16 +228,14 @@ class Qwen3ASRMLXBatchFolder:
         print(f"\n==== Qwen3ASRMLXBatchFolder 共找到 {len(file_list)} 个分片音频 ====")
         for f in file_list:
             print(f" > {Path(f).name}")
-
         total_offset = 0.0 # 时间偏移：累计前面所有音频总时长（秒）
         all_merged_segments = []
-
+        lang_arg = None if language_hint == "auto" else language_hint
         for idx, audio_file in enumerate(file_list):
             # 获取当前分片音频实际时长
             info = sf.info(audio_file)
             dur = info.duration
             print(f"--处理分片 {Path(audio_file).name} | 分片时长={dur:.2f}s | 时间偏移offset={total_offset:.2f}s")
-
             # ✅ 使用output_dir下真实临时文件
             temp_base = os.path.join(output_dir, f"_temp_asr_part_{idx}")
             temp_json = f"{temp_base}.json"
@@ -221,9 +244,9 @@ class Qwen3ASRMLXBatchFolder:
                 audio=audio_file,
                 output_path=temp_base,
                 format="json",
-                verbose=verbose
+                verbose=verbose,
+                language=lang_arg,
             )
-
             # 优先取内存返回对象seg_obj；万一接口异常降级读取临时json文件
             seg_items = []
             if hasattr(seg_obj, "segments"):
@@ -235,7 +258,6 @@ class Qwen3ASRMLXBatchFolder:
                 with open(temp_json,"r",encoding="utf-8") as f:
                     jdata = json.load(f)
                 seg_items = jdata.get("segments", [])
-
             for s in seg_items:
                 d = {}
                 if isinstance(s,dict):
@@ -249,20 +271,14 @@ class Qwen3ASRMLXBatchFolder:
                     d["text"] = getattr(s,"text","").strip()
                 if d["text"]:
                     all_merged_segments.append(d)
-
-
-
             # ✅ 删除临时分片json，清理垃圾
             try:
                 os.unlink(temp_json)
             except OSError:
                 pass
-
             # 更新全局时间偏移
             total_offset += dur
-
         print(f"✅全部分片识别完成；合并总时长 {total_offset:.2f}s；有效字幕段：{len(all_merged_segments)}")
-
         # 根据选择格式写出合并字幕文件
         if file_format == "txt":
             save_as_txt_merged(all_merged_segments, out_base)
@@ -273,10 +289,13 @@ class Qwen3ASRMLXBatchFolder:
         elif file_format == "json":
             save_as_json_merged(all_merged_segments, out_base)
         elif file_format == "lrc":
-            save_as_lrc(all_merged_segments, out_base)
-
+            save_as_lrc(all_merged_segments, out_base,
+                        title=title_for_lrc,
+                        artist=artist_for_lrc,
+                        album=album_for_lrc,
+                        lrc_by=lrc_by)
         final_path = f"{out_base}.{file_format}"
-        with open(final_path,"r",encoding="utf‑8") as fp:
+        with open(final_path,"r",encoding="utf-8") as fp:
             merged_text = fp.read()
         print(f"✅合并字幕输出：{final_path}\n")
         return (final_path, merged_text)
@@ -287,6 +306,7 @@ NODE_CLASS_MAPPINGS = {
     "Qwen3ASRMLXGenerate": Qwen3ASRMLXGenerate,
     "Qwen3ASRMLXBatchFolder": Qwen3ASRMLXBatchFolder
 }
+
 NODE_DISPLAY_NAME_MAPPINGS = {
     "Qwen3ASRMLXLoader": "Qwen3 ASR MLX Loader",
     "Qwen3ASRMLXGenerate": "Qwen3 ASR MLX Generate(单文件)",

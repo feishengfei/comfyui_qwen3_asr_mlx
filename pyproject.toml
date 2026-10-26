@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "comfyui_qwen3_asr_mlx"
-version = "0.0.1"
+version = "0.0.2"
 description = "ComfyUI custom nodes for Qwen3-ASR Speech-To-Text using Apple MLX backend."
 authors = [
   {name = "Xiang Zhou", email = "zhouxiang841208@gmail.com"}
