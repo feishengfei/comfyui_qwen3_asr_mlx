@@ -186,27 +186,34 @@ class Qwen3ASRMLXBatchFolder:
         total_offset = 0.0 # 时间偏移：累计前面所有音频总时长（秒）
         all_merged_segments = []
 
-        for audio_file in file_list:
+        for idx, audio_file in enumerate(file_list):
             # 获取当前分片音频实际时长
             info = sf.info(audio_file)
             dur = info.duration
             print(f"--处理分片 {Path(audio_file).name} | 分片时长={dur:.2f}s | 时间偏移offset={total_offset:.2f}s")
 
-            # 执行单文件ASR识别；不使用内置保存，只拿内存segments对象
+            # ✅ 使用output_dir下真实临时文件
+            temp_base = os.path.join(output_dir, f"_temp_asr_part_{idx}")
+            temp_json = f"{temp_base}.json"
             seg_obj = generate_transcription(
                 model=model,
                 audio=audio_file,
-                output_path="/dev/null", # 不需要保存分片单独字幕
+                output_path=temp_base,
                 format="json",
                 verbose=verbose
             )
-            # 取出segments列表
+
+            # 优先取内存返回对象seg_obj；万一接口异常降级读取临时json文件
+            seg_items = []
             if hasattr(seg_obj, "segments"):
                 seg_items = seg_obj.segments
             elif hasattr(seg_obj, "sentences"):
                 seg_items = seg_obj.sentences
             else:
-                seg_items = []
+                # fallback：读取临时json
+                with open(temp_json,"r",encoding="utf-8") as f:
+                    jdata = json.load(f)
+                seg_items = jdata.get("segments", [])
 
             for s in seg_items:
                 d = {}
@@ -221,6 +228,15 @@ class Qwen3ASRMLXBatchFolder:
                     d["text"] = getattr(s,"text","").strip()
                 if d["text"]:
                     all_merged_segments.append(d)
+
+
+
+            # ✅ 删除临时分片json，清理垃圾
+            try:
+                os.unlink(temp_json)
+            except OSError:
+                pass
+
             # 更新全局时间偏移
             total_offset += dur
 
