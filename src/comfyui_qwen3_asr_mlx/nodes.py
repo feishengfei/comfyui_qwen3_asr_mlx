@@ -25,15 +25,36 @@ def format_lrc_timestamp(seconds:float) -> str:
     return f"{mm:02d}:{ss:05.2f}"
 
 def save_as_lrc(all_segments, output_path:str):
-    """输出标准 lrc 歌词字幕"""
-    lines = []
+    """
+    增强版LRC生成：
+    如果一个segment.text内部有多行，将多行在segment[start~end]时间区间均匀分配时间戳
+    """
+    lrc_lines = []
     for seg in all_segments:
-        t_start = format_lrc_timestamp(seg["start"])
-        text = seg["text"].strip()
-        lines.append(f"[{t_start}]{text}")
-    lrc_text = "\n".join(lines)
-    with open(f"{output_path}.lrc","w",encoding="utf‑8") as f:
-        f.write(lrc_text)
+        seg_start = seg["start"]
+        seg_end = seg["end"]
+        seg_text = seg["text"].rstrip("%").strip()  # 去除末尾可能出现的%符号（你的样例有）
+        # 按换行切分内部多行
+        sub_lines = [line.strip() for line in seg_text.splitlines() if line.strip()]
+        if not sub_lines:
+            continue
+        duration_total = seg_end - seg_start
+        line_count = len(sub_lines)
+        if line_count == 1:
+            # 只有一行，直接使用seg_start
+            t_str = format_lrc_timestamp(seg_start)
+            lrc_lines.append(f"[{t_str}]{sub_lines[0]}")
+        else:
+            # 多行：均匀分摊时间
+            step = duration_total / line_count
+            for idx, sub_text in enumerate(sub_lines):
+                line_time = seg_start + step * idx
+                t_str = format_lrc_timestamp(line_time)
+                lrc_lines.append(f"[{t_str}]{sub_text}")
+
+    lrc_content = "\n".join(lrc_lines)
+    with open(f"{output_path}.lrc","w",encoding="utf-8") as f:
+        f.write(lrc_content)
 
 def save_as_txt_merged(all_segments, output_path:str):
     full_text = "\n".join(s["text"].strip() for s in all_segments)
