@@ -7,6 +7,79 @@ import soundfile as sf
 from mlx_audio.stt.utils    import load_model
 from mlx_audio.stt.generate import generate_transcription
 
+# ====================== 字幕后处理切分配置（大写常量） ==================
+SUBTITLE_MAX_CHARS = 35        # 单条字幕最大字符数(中英文均按字符计数)
+SUBTITLE_MAX_DURATION_S = 6.0  # 单条字幕最大时长(秒)
+SUBTITLE_SPLIT_PUNCT = "，。！？；"       # 中文优先切分标点
+SUBTITLE_SPLIT_PUNCT_EN = ",.!?;"        # 英文切分标点
+TRIM_PUNCT_EXCEPT = "！？!?" # trim ending except zh/en exclamation & question mark
+# =============================================================================
+
+def split_by_text_ratio_interpolate(seg_items, max_chars: int, max_dur: float, puncts: str):
+    """
+    无align、无word时间戳：按标点/最大字符切分，按【字符数量占比】分配片段时长
+    字符计数使用len()，天然兼容中文、英文混合文本
+    :param seg_items: ASR输出segment列表，仅包含 start,end,text
+    :param max_chars: 单片段最大字符数
+    :param max_dur: 单片段最大时长(本函数仅作为配置保留，切分逻辑以标点+字符数为主)
+    :param puncts: 切分标点集合字符串
+    :return: list[dict], 局部时间(未叠加分片offset) [{"start":float,"end":float,"text":str}]
+    """
+    out = []
+    punct_set = set(puncts)
+    for seg in seg_items:
+        if isinstance(seg, dict):
+            seg_start = seg.get("start", 0.0)
+            seg_end = seg.get("end", 0.0)
+            full_text = seg.get("text", "").strip()
+        else:
+            seg_start = getattr(seg, "start", 0.0)
+            seg_end = getattr(seg, "end", 0.0)
+            full_text = getattr(seg, "text", "").strip()
+        seg_total_dur = seg_end - seg_start
+        # 边界保护：空文本或时长接近0，直接原样返回
+        if not full_text or seg_total_dur <= 1e-6:
+            out.append({"start": seg_start, "end": seg_end, "text": full_text})
+            continue
+        pieces = []
+        buf = []
+        for ch in full_text:
+            buf.append(ch)
+            buf_str = "".join(buf)
+            # 遇到切分标点 或 字符数达到上限，执行断开
+            if ch in punct_set or len(buf_str) >= max_chars:
+                piece = buf_str.strip()
+                # 去除片段末尾的切分标点
+                while len(piece) > 0 and piece[-1] in punct_set and piece[-1] not in TRIM_PUNCT_EXCEPT:
+                    piece = piece[:-1].strip()
+                if piece:
+                    pieces.append(piece)
+                buf.clear()
+        # 缓冲区剩余内容
+        if buf:
+            piece = "".join(buf).strip()
+            if piece:
+                pieces.append(piece)
+        if len(pieces) == 0:
+            out.append({"start": seg_start, "end": seg_end, "text": full_text})
+            continue
+        # 全部子片段总字符数，用于计算占比
+        total_char = sum(len(p) for p in pieces)
+        cur_t = seg_start
+        for piece in pieces:
+            char_cnt = len(piece)
+            ratio = char_cnt / total_char
+            piece_dur = seg_total_dur * ratio
+            p_end = cur_t + piece_dur
+            out.append({
+                "start": cur_t,
+                "end": p_end,
+                "text": piece
+            })
+            cur_t = p_end
+    return out
+
+
 def format_timestamp(seconds: float) -> str:
     """Convert seconds to HH:MM:SS,mmm format for SRT"""
     hours = int(seconds // 3600)
@@ -42,11 +115,6 @@ def save_as_lrc(all_segments, output_path:str, title:str="", artist:str="", albu
         lrc_lines.append(f"[by:{lrc_by.strip()}]")
     if lrc_lines:
         lrc_lines.append("") # 空行分隔元标签与歌词
-
-    print(f"\n==== lrc banner ====\n")
-    for s in lrc_lines:
-        print(f"{s}")
-    print(f"\n==== lrc banner ====\n")
     for seg in all_segments:
         seg_start = seg["start"]
         seg_end = seg["end"]
@@ -176,6 +244,7 @@ class Qwen3ASRMLXGenerate:
 # =========================
 # 🔹【新增】批量文件夹分片ASR节点 Qwen3ASRMLXBatchFolder
 # 匹配 {prefix}_000.wav / {prefix}_001.mp3，按序号升序识别，累加时间戳，合并输出txt/srt/vtt/json/lrc
+# 新增开关 auto_split_subtitle：默认True，启用按字符占比插值自动切分字幕；关闭输出原始ASR segment
 # =========================
 class Qwen3ASRMLXBatchFolder:
     @classmethod
@@ -192,6 +261,7 @@ class Qwen3ASRMLXBatchFolder:
                 "trigger": ("*",{"tooltip":"时序触发，等待上游音频全部写入磁盘后再执行ASR"})
             },
             "optional":{
+                "auto_split_subtitle": ("BOOLEAN",{"default":True,"tooltip":"开启：按标点+字符占比插值切分长字幕（无word‑level对齐）；关闭：输出ASR原始大segment，适合调试原始时间戳"}),
                 "language_hint": (["auto","zh","en","ja","ko","ru","fr"],{"default":"auto","tooltip":"语言提示hint；auto=模型自动检测，zh=中文，en=英文，改善识别漂移，中文TTS音频建议选zh"}),
                 "title_for_lrc": ("STRING", {"default":"","tooltip":"LRC元标签ti(歌曲标题)；仅file_format=lrc生效，留空不输出标签"}),
                 "artist_for_lrc": ("STRING", {"default":"","tooltip":"LRC元标签ar(艺术家)；仅file_format=lrc生效，留空不输出标签"}),
@@ -205,6 +275,7 @@ class Qwen3ASRMLXBatchFolder:
     CATEGORY = "Qwen3-ASR-MLX"
     OUTPUT_NODE = True
     def batch_run(self, model, audio_folder, file_prefix, output_dir, out_filename, file_format, verbose, trigger,
+        auto_split_subtitle=True,
         language_hint="auto",
         title_for_lrc="", artist_for_lrc="", album_for_lrc="", lrc_by=""):
         target_dir = Path(audio_folder).absolute()
@@ -258,19 +329,40 @@ class Qwen3ASRMLXBatchFolder:
                 with open(temp_json,"r",encoding="utf-8") as f:
                     jdata = json.load(f)
                 seg_items = jdata.get("segments", [])
-            for s in seg_items:
-                d = {}
-                if isinstance(s,dict):
-                    d["start"] = s.get("start",0.0)+total_offset
-                    d["end"] = s.get("end",0.0)+total_offset
-                    d["text"] = s.get("text","").strip()
-                else:
-                    # 对象属性（AlignedSentence）
-                    d["start"] = getattr(s,"start",0.0)+total_offset
-                    d["end"] = getattr(s,"end",0.0)+total_offset
-                    d["text"] = getattr(s,"text","").strip()
+
+            # ========== 新增：字幕切分逻辑，auto_split_subtitle开关控制 ==========
+            if auto_split_subtitle:
+                all_punct = SUBTITLE_SPLIT_PUNCT + SUBTITLE_SPLIT_PUNCT_EN
+                local_segs = split_by_text_ratio_interpolate(
+                    seg_items,
+                    max_chars=SUBTITLE_MAX_CHARS,
+                    max_dur=SUBTITLE_MAX_DURATION_S,
+                    puncts=all_punct
+                )
+                print(f"ℹ️ auto_split_subtitle开启，原始{len(seg_items)} → 切分后{len(local_segs)}条子目")
+            else:
+                # 不切分，原样转为dict
+                local_segs = []
+                for s in seg_items:
+                    d = {}
+                    if isinstance(s,dict):
+                        d["start"] = s.get("start",0.0)
+                        d["end"] = s.get("end",0.0)
+                        d["text"] = s.get("text","").strip()
+                    else:
+                        d["start"] = getattr(s,"start",0.0)
+                        d["end"] = getattr(s,"end",0.0)
+                        d["text"] = getattr(s,"text","").strip()
+                    if d["text"]:
+                        local_segs.append(d)
+
+            # 叠加分片全局时间偏移
+            for d in local_segs:
+                d["start"] = d["start"] + total_offset
+                d["end"] = d["end"] + total_offset
                 if d["text"]:
                     all_merged_segments.append(d)
+
             # ✅ 删除临时分片json，清理垃圾
             try:
                 os.unlink(temp_json)
