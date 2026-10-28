@@ -207,7 +207,7 @@ class Qwen3ASRMLXGenerate:
                 "verbose" : ("BOOLEAN", {"default": True}),
             },
             "optional":{
-                "language_hint": (["auto","zh","en","ja","ko","ru","fr"],{"default":"auto","tooltip":"语言提示hint；auto=模型自动检测，zh=中文，en=英文，改善识别漂移"}),
+                "language_hint": (["zh","en","ja","ko","ru","fr"],{"default":"zh","tooltip":"语言提示hint；zh=中文，en=英文，改善识别漂移"}),
             }
         }
     RETURN_TYPES = ("STRING", "STRING")
@@ -223,12 +223,12 @@ class Qwen3ASRMLXGenerate:
         file_prefix,
         file_format,
         verbose,
-        language_hint="auto",
+        language_hint="zh",
     ):
         os.makedirs(output_dir, exist_ok=True)
         output_path=os.path.join(output_dir, f'{file_prefix}')
         result = ''
-        lang_arg = None if language_hint == "auto" else language_hint
+        lang_arg = language_hint
         segments = generate_transcription(
             model=model,
             audio=audio_path,
@@ -262,7 +262,7 @@ class Qwen3ASRMLXBatchFolder:
             },
             "optional":{
                 "auto_split_subtitle": ("BOOLEAN",{"default":True,"tooltip":"开启：按标点+字符占比插值切分长字幕（无word‑level对齐）；关闭：输出ASR原始大segment，适合调试原始时间戳"}),
-                "language_hint": (["auto","zh","en","ja","ko","ru","fr"],{"default":"auto","tooltip":"语言提示hint；auto=模型自动检测，zh=中文，en=英文，改善识别漂移，中文TTS音频建议选zh"}),
+                "language_hint": (["zh","en","ja","ko","ru","fr"],{"default":"zh","tooltip":"语言提示hint；zh=中文，en=英文，改善识别漂移，中文TTS音频建议选zh"}),
                 "title_for_lrc": ("STRING", {"default":"","tooltip":"LRC元标签ti(歌曲标题)；仅file_format=lrc生效，留空不输出标签"}),
                 "artist_for_lrc": ("STRING", {"default":"","tooltip":"LRC元标签ar(艺术家)；仅file_format=lrc生效，留空不输出标签"}),
                 "album_for_lrc": ("STRING", {"default":"","tooltip":"LRC元标签al(专辑)；仅file_format=lrc生效，留空不输出标签"}),
@@ -276,7 +276,7 @@ class Qwen3ASRMLXBatchFolder:
     OUTPUT_NODE = True
     def batch_run(self, model, audio_folder, file_prefix, output_dir, out_filename, file_format, verbose, trigger,
         auto_split_subtitle=True,
-        language_hint="auto",
+        language_hint="zh",
         title_for_lrc="", artist_for_lrc="", album_for_lrc="", lrc_by=""):
         target_dir = Path(audio_folder).absolute()
         if not target_dir.is_dir():
@@ -301,7 +301,7 @@ class Qwen3ASRMLXBatchFolder:
             print(f" > {Path(f).name}")
         total_offset = 0.0 # 时间偏移：累计前面所有音频总时长（秒）
         all_merged_segments = []
-        lang_arg = None if language_hint == "auto" else language_hint
+        lang_arg = language_hint
         for idx, audio_file in enumerate(file_list):
             # 获取当前分片音频实际时长
             info = sf.info(audio_file)
@@ -320,6 +320,7 @@ class Qwen3ASRMLXBatchFolder:
             )
             # 优先取内存返回对象seg_obj；万一接口异常降级读取临时json文件
             seg_items = []
+            print(f"FELIX seg_obj:{seg_obj}")
             if hasattr(seg_obj, "segments"):
                 seg_items = seg_obj.segments
             elif hasattr(seg_obj, "sentences"):

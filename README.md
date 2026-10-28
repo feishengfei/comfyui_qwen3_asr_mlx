@@ -19,6 +19,7 @@ This project targets **Apple Silicon chips only**, provides workflow for audio(w
 - ✅ Time offset auto‑accumulate for batch‑split audio slices
 - ✅ Clean temporary json artifacts after batch processing
 - ✅ Language hint for multi‑language audio to reduce recognition drift
+- ⚠️ **mlx‑audio 当前版本底层不支持自动语种检测，language_hint 必须手动指定语种编码（zh/en/ja…），不能传 None，无 auto 选项**；
 
 > Limitation:
 > - The built‑in subtitle split `split_by_text_ratio_interpolate` is a fallback solution **without real word‑level timestamps**. It works well for steady‑speed TTS speech; timestamps may drift for singing audio.
