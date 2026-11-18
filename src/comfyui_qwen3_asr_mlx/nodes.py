@@ -246,6 +246,21 @@ class Qwen3ASRMLXGenerate:
 # 匹配 {prefix}_000.wav / {prefix}_001.mp3，按序号升序识别，累加时间戳，合并输出txt/srt/vtt/json/lrc
 # 新增开关 auto_split_subtitle：默认True，启用按字符占比插值自动切分字幕；关闭输出原始ASR segment
 # =========================
+
+def natural_key(s: str):
+    """手写自然排序key，不引入第三方依赖；数字片段转为int，其余保留字符串。
+    仅用于文件名，支持数字出现在开头/中间/末尾，兼容补零001与裸数字1
+    """
+    parts = re.split(r'(\d+)', s)
+    res = []
+    for p in parts:
+        if p.isdigit():
+            res.append(int(p))
+        else:
+            res.append(p)
+    return res
+
+
 class Qwen3ASRMLXBatchFolder:
     @classmethod
     def INPUT_TYPES(cls):
@@ -253,7 +268,9 @@ class Qwen3ASRMLXBatchFolder:
             "required":{
                 "model": ("QWEN3_ASR_MODEL",),
                 "audio_folder": ("STRING", {"default":"","tooltip":"分片音频存放绝对目录，tts_000.wav等在此目录"}),
-                "file_prefix": ("STRING", {"default":"tts","tooltip":"分片文件前缀，例如tts匹配tts_000.wav"}),
+                "scan_mode": (["prefix_match", "glob_all_audio"], {"default":"prefix_match", "tooltip":"prefix_match:旧模式按file_prefix匹配；glob_all_audio:扫描目录全部匹配后缀音频，file_prefix参数将被忽略，使用文件名自然数字排序"}),
+                "file_prefix": ("STRING", {"default":"tts","tooltip":"分片文件前缀，prefix_match模式生效；glob_all_audio模式此参数无效"}),
+                "audio_ext": (["wav", "mp3", "both"], {"default":"both", "tooltip":"glob_all_audio模式生效；筛选音频后缀，大小写不敏感"}),
                 "output_dir": ("STRING", {"default":"asr_batch_output","tooltip":"合并字幕输出目录"}),
                 "out_filename": ("STRING", {"default":"merged_subtitle","tooltip":"合并输出文件名（不带后缀）"}),
                 "file_format": (["txt","srt","vtt","json","lrc"],{"default":"lrc"}),
@@ -274,7 +291,7 @@ class Qwen3ASRMLXBatchFolder:
     FUNCTION = "batch_run"
     CATEGORY = "Qwen3-ASR-MLX"
     OUTPUT_NODE = True
-    def batch_run(self, model, audio_folder, file_prefix, output_dir, out_filename, file_format, verbose, trigger,
+    def batch_run(self, model, audio_folder, scan_mode, file_prefix, audio_ext, output_dir, out_filename, file_format, verbose, trigger,
         auto_split_subtitle=True,
         language_hint="zh",
         title_for_lrc="", artist_for_lrc="", album_for_lrc="", lrc_by=""):
@@ -283,22 +300,50 @@ class Qwen3ASRMLXBatchFolder:
             raise NotADirectoryError(f"音频分片目录不存在：{target_dir}")
         os.makedirs(output_dir, exist_ok=True)
         out_base = os.path.join(output_dir, out_filename)
-        # 正则匹配 prefix_数字. wav/mp3
-        escaped_pre = re.escape(file_prefix)
-        pat = re.compile(rf"^{escaped_pre}_(\d+)\.(wav|mp3)$", re.IGNORECASE)
-        matched = []
-        for fname in os.listdir(target_dir):
-            m = pat.match(fname)
-            if m:
-                seq = int(m.group(1))
-                matched.append((seq, fname))
-        if len(matched) ==0:
-            raise FileNotFoundError(f"目录 {target_dir} 没有找到 {file_prefix}_xxx.wav / mp3")
-        matched.sort(key=lambda x:x[0])
-        file_list = [str(target_dir/fn) for _,fn in matched]
+
+        file_list = []
+        if scan_mode == "prefix_match":
+            # ==========原有旧逻辑完整保留==========
+            escaped_pre = re.escape(file_prefix)
+            pat = re.compile(rf"^{escaped_pre}_(\d+)\.(wav|mp3)$", re.IGNORECASE)
+            matched = []
+            for fname in os.listdir(target_dir):
+                m = pat.match(fname)
+                if m:
+                    seq = int(m.group(1))
+                    matched.append((seq, fname))
+            if len(matched) ==0:
+                raise FileNotFoundError(f"目录 {target_dir} 没有找到 {file_prefix}_xxx.wav / mp3")
+            matched.sort(key=lambda x:x[0])
+            file_list = [str(target_dir/fn) for _,fn in matched]
+
+        elif scan_mode == "glob_all_audio":
+            # ==========新增全盘扫描自然排序模式==========
+            candidates = []
+            for fname in os.listdir(target_dir):
+                fpath = target_dir / fname
+                if not fpath.is_file():
+                    continue
+                suffix = fpath.suffix.lower()
+                accept = False
+                if audio_ext == "wav" and suffix == ".wav":
+                    accept = True
+                elif audio_ext == "mp3" and suffix == ".mp3":
+                    accept = True
+                elif audio_ext == "both" and suffix in (".wav", ".mp3"):
+                    accept = True
+                if accept:
+                    candidates.append(fpath)
+            if not candidates:
+                raise FileNotFoundError(f"glob_all_audio模式：目录 {target_dir} 未找到匹配 {audio_ext} 的音频文件")
+            # 使用文件名做自然排序，不带路径，避免路径数字干扰
+            candidates_sorted = sorted(candidates, key=lambda p: natural_key(p.name))
+            file_list = [str(p) for p in candidates_sorted]
+
         print(f"\n==== Qwen3ASRMLXBatchFolder 共找到 {len(file_list)} 个分片音频 ====")
         for f in file_list:
             print(f" > {Path(f).name}")
+
         total_offset = 0.0 # 时间偏移：累计前面所有音频总时长（秒）
         all_merged_segments = []
         lang_arg = language_hint
@@ -330,8 +375,7 @@ class Qwen3ASRMLXBatchFolder:
                 with open(temp_json,"r",encoding="utf-8") as f:
                     jdata = json.load(f)
                 seg_items = jdata.get("segments", [])
-
-            # ========== 新增：字幕切分逻辑，auto_split_subtitle开关控制 ==========
+            # ========== 字幕切分逻辑，auto_split_subtitle开关控制 ==========
             if auto_split_subtitle:
                 all_punct = SUBTITLE_SPLIT_PUNCT + SUBTITLE_SPLIT_PUNCT_EN
                 local_segs = split_by_text_ratio_interpolate(
@@ -356,14 +400,12 @@ class Qwen3ASRMLXBatchFolder:
                         d["text"] = getattr(s,"text","").strip()
                     if d["text"]:
                         local_segs.append(d)
-
             # 叠加分片全局时间偏移
             for d in local_segs:
                 d["start"] = d["start"] + total_offset
                 d["end"] = d["end"] + total_offset
                 if d["text"]:
                     all_merged_segments.append(d)
-
             # ✅ 删除临时分片json，清理垃圾
             try:
                 os.unlink(temp_json)
@@ -392,7 +434,6 @@ class Qwen3ASRMLXBatchFolder:
             merged_text = fp.read()
         print(f"✅合并字幕输出：{final_path}\n")
         return (final_path, merged_text)
-
 
 NODE_CLASS_MAPPINGS = {
     "Qwen3ASRMLXLoader": Qwen3ASRMLXLoader,
