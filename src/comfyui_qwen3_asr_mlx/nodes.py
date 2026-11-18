@@ -1,3 +1,4 @@
+import gc
 import os
 import re
 import json
@@ -190,6 +191,45 @@ class Qwen3ASRMLXLoader:
         model = load_model(model_dir)
         self._model_cache[model_dir] = model
         return (model,)
+
+class Qwen3ASRMLXModelUnloader:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "model_dir": ("STRING", {
+                    "default": "/path/to/your/qwen3asr-folder",
+                    "tooltip":"需要卸载的模型目录，必须与Qwen3 ASR MLX Loader填写路径完全一致"
+                }),
+                "trigger": ("*", {
+                    "tooltip":"时序触发器；必须放在所有使用该模型的节点之后执行，收到信号才执行卸载"
+                })
+            }
+        }
+
+    RETURN_TYPES = ("*", "STRING")
+    RETURN_NAMES = ("signal_out", "msg")
+    FUNCTION = "unload_model_node"
+    CATEGORY = "Qwen3-ASR-MLX"
+    OUTPUT_NODE = False
+
+    def unload_model_node(self, model_dir, trigger):
+        cache = Qwen3ASRMLXLoader._model_cache
+        msg = ""
+        model_dir_stripped = model_dir.strip()
+
+        if model_dir_stripped in cache:
+            model_obj = cache.pop(model_dir_stripped)
+            del model_obj
+            gc.collect()
+            msg = f"✅模型缓存已移除：{model_dir_stripped}"
+            print(f"[Qwen3ASRMLXModelUnloader] {msg}")
+        else:
+            msg = f"ℹ️缓存内未找到模型：{model_dir_stripped}，无需卸载"
+            print(f"[Qwen3ASRMLXModelUnloader] {msg}")
+
+        # 透传trigger信号，供后续链路
+        return (trigger, msg)
 
 # =========================
 # 🔹 ASR(单文件)生成节点（原有保留，增加language_hint）
@@ -437,12 +477,14 @@ class Qwen3ASRMLXBatchFolder:
 
 NODE_CLASS_MAPPINGS = {
     "Qwen3ASRMLXLoader": Qwen3ASRMLXLoader,
+    "Qwen3ASRMLXModelUnloader": Qwen3ASRMLXModelUnloader,
     "Qwen3ASRMLXGenerate": Qwen3ASRMLXGenerate,
     "Qwen3ASRMLXBatchFolder": Qwen3ASRMLXBatchFolder
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "Qwen3ASRMLXLoader": "Qwen3 ASR MLX Loader",
+    "Qwen3ASRMLXModelUnloader": "Qwen3 ASR MLX Unloader",
     "Qwen3ASRMLXGenerate": "Qwen3 ASR MLX Generate(单文件)",
     "Qwen3ASRMLXBatchFolder": "Qwen3 ASR MLX Batch 文件夹分片合并ASR"
 }
